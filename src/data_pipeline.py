@@ -2,7 +2,7 @@
 
 """
 ------------------------------------------------------------------------------------
-                                Design notes by Swarup Baba
+                                Design notes
 ------------------------------------------------------------------------------------
 
 - All feature engineering here is causal (uses only past data at each row) so
