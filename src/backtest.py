@@ -80,7 +80,7 @@ def run_backtest(prices: pd.DataFrame, long_df: pd.DataFrame, config: BacktestCo
         # blend: mostly historical mean (robust), a small ML tilt (since ML signal is weak — this reflects reality rather than pretending ML is reliable)
         mu = hist_mean.reindex(tickers).fillna(0)
         ml_tilt = ml_preds.reindex(tickers).fillna(0)
-        expected_returns = mu + 5.0 * ml_tilt  # ML predicts 5-day return; scale to annual-ish tilt
+        expected_returns = mu + 5.0 * ml_tilt  # ML predicts 21-day return; scale to annual-ish tilt
 
         # Out-of-sample IC check (needs the actuals, only available once we
         # pass this rebalance date, so we log predicted vs what actually happened over the NEXT window for diagnostic purposes)
