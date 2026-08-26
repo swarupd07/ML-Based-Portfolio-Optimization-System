@@ -12,7 +12,7 @@ from src.market_data import (
 )
 from src.backtest import performance_metrics
 
-UNCERTAINTY_MULTIPLIER = 15
+UNCERTAINTY_MULTIPLIER = 3
 
 # =====================================================================================================
 prices = pd.read_parquet("data/prices.parquet")
