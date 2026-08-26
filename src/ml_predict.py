@@ -10,7 +10,7 @@ FEATURE_COLS = [
     "mom_5d", "mom_21d", "vol_21d", "vol_63d",
     "ma_ratio_10_50", "rsi_14", "macd_hist",
 ]
-TARGET_COL = "fwd_return_5d"
+TARGET_COL = "fwd_return_21d"
 
 # ------------------------------------------------------------------------------------
 
@@ -38,7 +38,7 @@ def train_predict(
 
     Returns
     -------
-    predictions : pd.Series indexed by ticker, the predicted fwd_return_5d
+    predictions : pd.Series indexed by ticker, the predicted fwd_return_21d
     diagnostics : dict with n_train_rows, in-fold IC, etc. for logging
     """
     train = long_df[long_df["date"] < train_end].dropna(subset=FEATURE_COLS + [TARGET_COL])
