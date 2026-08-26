@@ -2,7 +2,7 @@
 
 """
 ------------------------------------------------------------------------------------
-                                Design notes
+                                Design notes by Swarup 
 ------------------------------------------------------------------------------------
 
 - All feature engineering here is causal (uses only past data at each row) so
@@ -85,8 +85,8 @@ def engineer_features(prices: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Compute per-ticker features from a wide price DataFrame...
 
     Returns a dict of wide DataFrames (date x ticker), one per feature, plus
-    'returns' (simple daily returns) and 'fwd_return_5d' (the ML target: the
-    forward 5-day return, shifted so no lookahead).
+    'returns' (simple daily returns) and 'fwd_return_21d' (the ML target: the
+forward 21-day return, shifted so no lookahead).
     """
     returns = prices.pct_change()
 
@@ -112,8 +112,8 @@ def engineer_features(prices: pd.DataFrame) -> dict[str, pd.DataFrame]:
     signal = macd.ewm(span=9, adjust=False).mean()
     feats["macd_hist"] = macd - signal
 
-    # ML target: forward 5-day return (shifted -5 so the label at date t is known only using prices up to t+5 — this column must be dropped from any "features" matrix and used only as y).
-    feats["fwd_return_5d"] = prices.pct_change(5).shift(-5)
+    # ML target: forward 21-day return (shifted -21 so the label at date t is known only using prices up to t+21 — this column must be dropped from any "features" matrix and used only as y).
+    feats["fwd_return_21d"] = prices.pct_change(21).shift(-21)
 
     return feats
 
