@@ -17,7 +17,7 @@ Default final research configuration
 - BL market risk aversion δ = 2.5
 - tau = 0.05
 - relative views = 10
-- uncertainty multiplier = 3
+- uncertainty multiplier = 1
 - BL covariance window = up to 756 trading days
 - portfolio-risk covariance window = 252 trading days
 - portfolio risk aversion = 3
@@ -52,7 +52,7 @@ from src.backtest import performance_metrics
 
 
 # ------------------------------------------------------------------------------------
-DEFAULT_UNCERTAINTY_MULTIPLIER = 3.0
+DEFAULT_UNCERTAINTY_MULTIPLIER = 1.0
 
 MARKET_RISK_AVERSION = 2.5
 TAU = 0.05
