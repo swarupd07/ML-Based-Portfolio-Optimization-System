@@ -2,9 +2,10 @@
 
 An end-to-end quantitative investment platform that predicts stock returns using
 machine learning, estimates portfolio risk using **Ledoit-Wolf shrinkage
-covariance estimation**, and allocates capital via **convex (Markowitz)
-optimization** — validated with an honest, walk-forward backtest that includes
-transaction costs.
+covariance estimation**, constructs expected returns using both the original
+historical-mean/ML approach and a **Black-Litterman + ML extension**, and allocates
+capital via **convex (Markowitz) optimization** — validated with an honest,
+walk-forward backtest that includes transaction costs.
 
 This README documents not just what the system does, but **what we actually
 found when we tested it on real NSE data** — including a result that
@@ -67,28 +68,42 @@ and more important finding than the original hypothesis — documented in
 
 ## 2. System architecture
 
-```
+```text
 Historical prices (yfinance, NSE large-caps)
         │
         ▼
-Feature engineering (returns, momentum, volatility, RSI, MACD)
+Feature engineering
+(returns, 5d/21d momentum, volatility, RSI, MACD)
         │
-        ├──────────────────► Covariance estimation
-        │                     (sample vs. Ledoit-Wolf shrinkage)
-        ▼
-ML expected-return model (LightGBM, walk-forward trained)
-        │
-        ▼
-Markowitz optimizer (cvxpy: maximize return − risk_aversion × risk)
+        ├──────────────────────► Covariance estimation
+        │                        Sample vs. Ledoit-Wolf shrinkage
         │
         ▼
-Walk-forward backtest (monthly rebalancing, transaction costs, turnover cap)
+21-day ML return model
+(LightGBM, walk-forward trained)
+        │
+        ├──────────────────────► Original return-estimation path
+        │                        Historical mean + ML tilt
+        │
+        └──────────────────────► Black-Litterman extension
+                                 Point-in-time market-cap prior
+                                 + relative ML views
+                                 + explicit view uncertainty
+                                           │
+                                           ▼
+Constrained Markowitz optimizer
         │
         ▼
-Compare: Equal-weight | Sample-cov Markowitz | Shrinkage-cov Markowitz | Min-variance
+Walk-forward backtest
+(monthly rebalancing, 10 bps costs, turnover cap)
         │
         ▼
-Streamlit dashboard
+Compare:
+Equal-weight | Sample-cov | Shrinkage-cov | Min-variance
+| BL prior-only | BL + ML
+        │
+        ▼
+Streamlit portfolio interface
 ```
 
 Every stage is designed around one non-negotiable rule: **no lookahead.** At
@@ -119,7 +134,7 @@ the backtest results trustworthy rather than optimistic fiction.
 | `ma_ratio_10_50` | 10-day vs. 50-day moving average ratio |
 | `rsi_14` | 14-day Relative Strength Index |
 | `macd_hist` | MACD histogram (12/26/9) |
-| `fwd_return_5d` | **Target only** — forward 5-day return, shifted to avoid lookahead |
+| `fwd_return_21d` | **Target only** — forward 21-day return, shifted to avoid lookahead and aligned with the monthly holding horizon |
 
 ### 3.3 Covariance estimation — the technical centerpiece
 
@@ -144,17 +159,126 @@ Two sources, blended:
 
 - **Historical mean** — trailing annualized mean daily return. The simple,
   robust baseline.
-- **ML tilt** — a LightGBM regressor trained walk-forward on the engineered
-  features, predicting 5-day forward returns. Its signal quality is measured
-  honestly via **Information Coefficient (IC)** — the Spearman rank
-  correlation between predicted and realized returns — rather than R²,
-  which is nearly meaningless for return prediction at this noise level.
+- **ML tilt / view signal** — a LightGBM regressor trained walk-forward on the
+  engineered features, now predicting **21-day forward returns** so that the
+  forecast horizon approximately matches the monthly rebalance/holding period.
+  Its signal quality is measured honestly via **Information Coefficient (IC)** —
+  the Spearman rank correlation between predicted and realized returns — rather
+  than R², which is nearly meaningless for return prediction at this noise level.
 
-### 3.5 Optimization
+### 3.5 Black-Litterman expected-return extension
+
+The original experiments identified expected-return estimation as the main
+bottleneck: improving `Σ` did not solve the instability caused by noisy `μ`.
+The extension therefore keeps the existing covariance/optimizer infrastructure
+and changes the way expected returns are constructed.
+
+The Black-Litterman equilibrium prior is
+
+```text
+π = δ Σ_BL w_mkt
+```
+
+where:
+
+- `π` is the market-implied equilibrium expected-return vector,
+- `δ = 2.5` is the fixed market risk-aversion value used in the main experiment,
+- `Σ_BL` is a longer-window Ledoit-Wolf covariance estimate,
+- `w_mkt` is the point-in-time market-capitalization weight vector.
+
+Historical market caps are reconstructed as
+
+```text
+market_cap_i,t = adjusted_price_i,t × shares_outstanding_i,t
+w_i,t = market_cap_i,t / Σ_j market_cap_j,t
+```
+
+Historical shares outstanding are aligned point-in-time using the latest
+observation available **on or before** each rebalance date. Missing early
+observations are not backfilled from the future.
+
+A rolling market-risk-aversion estimate was also tested:
+
+```text
+δ_t = (E[R_m] − R_f) / Var(R_m)
+```
+
+but one-year estimates were highly unstable, including negative values and
+values above 10. Because that instability comes from the same noisy mean-return
+problem the BL extension is intended to reduce, the main experiment uses the
+fixed value `δ = 2.5` and keeps the rolling estimate only as a diagnostic.
+
+### 3.6 ML forecasts as relative views
+
+The ML model is not treated as an exact absolute-return oracle. Instead it is
+used as a **cross-sectional ranking signal**.
+
+Top-ranked and bottom-ranked stocks are paired into relative views:
+
+```text
+winner − loser = predicted relative outperformance
+```
+
+Each view is encoded through the Black-Litterman matrices:
+
+- `P`: `+1` for the preferred stock, `−1` for the paired weaker stock,
+- `Q`: the predicted 21-day return spread, annualized using `252 / 21`,
+- `n_views = 10` in the main experiment,
+- individual annualized relative views are loosely clipped to `±15%` as an
+  outlier safety guard.
+
+This is deliberately more conservative than using raw ML forecasts as exact
+absolute expected returns.
+
+### 3.7 View uncertainty
+
+View uncertainty is modeled as
+
+```text
+Ω = diag(P (τ Σ_BL) P') × uncertainty_multiplier
+```
+
+with
+
+```text
+τ = 0.05
+```
+
+in the completed experiment.
+
+A larger `uncertainty_multiplier` means less confidence in the ML views; a
+smaller value gives them more influence.
+
+The posterior expected-return vector is
+
+```text
+μ_BL =
+[(τΣ)^−1 + P'Ω^−1P]^−1
+[(τΣ)^−1π + P'Ω^−1Q]
+```
+
+so the final estimate is a confidence-weighted compromise between the
+market-equilibrium prior and the ML information.
+
+### 3.8 Two covariance horizons for two different roles
+
+The extension intentionally separates two covariance roles:
+
+- **BL equilibrium covariance:** up to `756` trading days, using Ledoit-Wolf
+  shrinkage; used consistently for `π`, `τΣ`, `Ω`, and the BL posterior.
+- **Portfolio-risk covariance:** the most recent `252` trading days, also using
+  Ledoit-Wolf shrinkage; used by the optimizer.
+
+This split was introduced after the shorter covariance window made the
+market-implied prior excessively regime-sensitive during the COVID period.
+The longer window gives the equilibrium prior a more stable structural anchor,
+while the 252-day window keeps current portfolio risk responsive.
+
+### 3.9 Optimization
 
 A convex mean-variance optimizer (`cvxpy`, `OSQP` solver) solves:
 
-```
+```text
 maximize    w'μ − risk_aversion · w'Σw
 subject to  Σw = 1
             0 ≤ w_i ≤ max_weight   (per-stock cap, default 15%)
@@ -165,7 +289,7 @@ subject to  Σw = 1
 heavily; high values effectively ignore it and behave like a pure
 minimum-variance portfolio.
 
-### 3.6 Backtesting
+### 3.10 Backtesting
 
 Strict walk-forward validation: at every monthly rebalance date, the model is
 retrained and the covariance matrix recomputed using **only data strictly
@@ -222,7 +346,7 @@ a short, recent lookback window** (which is common in practice, since
 markets aren't stationary and stale multi-year correlation estimates can be
 misleading).
 
-### 4.2 Full walk-forward backtest (default config: `risk_aversion=3`, monthly rebalance, 10bps costs)
+### 4.2 Original walk-forward result (historical experiment retained unchanged)
 
 | Strategy | Annualized Return | Annualized Vol | **Sharpe** | Sortino | Max Drawdown |
 |---|---|---|---|---|---|
@@ -234,9 +358,163 @@ misleading).
 **Mean out-of-sample IC: 0.015** — essentially no usable predictive signal,
 reported honestly rather than hidden.
 
+> **Historical-result note:** this table is intentionally retained unchanged
+> because it represents the original stage of the project before the later
+> 21-day horizon alignment and Black-Litterman extension.
+
 This was **not** the expected outcome. Naive equal-weight beat every
 "sophisticated" strategy, including both Markowitz variants. This result
 triggered a deeper investigation rather than being buried — see Section 5.
+
+
+### 4.3 Updated 21-day ML-horizon baseline
+
+After diagnosing expected-return estimation as the dominant weakness, the ML
+target was aligned with the monthly portfolio decision horizon by changing the
+forward-return target from 5 trading days to **21 trading days**.
+
+The existing strategies were rerun using the updated 21-day signal.
+
+| Strategy | Total Return | Annualized Return | Annualized Vol | Sharpe | Sortino | Max Drawdown |
+|---|---:|---:|---:|---:|---:|---:|
+| Equal-weight | 2.1483 | **19.52%** | 16.89% | **0.7707** | 0.8808 | −34.57% |
+| Sample-cov Markowitz | 2.1180 | 19.34% | 18.92% | 0.6786 | 0.8181 | −31.51% |
+| Shrinkage-cov Markowitz | 2.0532 | 18.95% | 19.12% | 0.6512 | 0.7830 | −31.84% |
+| Min-variance | 1.4241 | 14.76% | **14.60%** | 0.5656 | 0.7135 | **−25.93%** |
+
+**Mean walk-forward out-of-sample IC with the 21-day target: `0.1019`.**
+
+The 21-day horizon is now the current implementation because it approximately
+matches the monthly rebalance/holding horizon. The original 5-day-stage results
+above are kept as part of the project history rather than overwritten.
+
+### 4.4 Black-Litterman prior-only ablation
+
+The first Black-Litterman experiment asks a controlled question:
+
+> Does performance come from the market-equilibrium prior itself, or from the
+> ML information added as views?
+
+The **BL Prior Only** portfolio uses `π = δΣ_BL w_mkt` but no ML views.
+
+At the completed configuration:
+
+| Strategy | Total Return | Annualized Return | Annualized Vol | Sharpe | Sortino | Max Drawdown |
+|---|---:|---:|---:|---:|---:|---:|
+| BL Prior Only | 1.4883 | 15.22% | 15.42% | **0.5659** | 0.6879 | −27.95% |
+
+This gives the reference point for measuring the incremental value of ML views.
+
+### 4.5 Black-Litterman + ML relative views
+
+With the same portfolio optimizer and risk model, adding uncertainty-weighted
+relative ML views materially improves performance.
+
+At `uncertainty_multiplier = 10`:
+
+| Strategy | Total Return | Annualized Return | Annualized Vol | Sharpe | Sortino | Max Drawdown |
+|---|---:|---:|---:|---:|---:|---:|
+| BL + ML | **1.9547** | **18.34%** | 15.44% | **0.7672** | **0.9415** | **−26.77%** |
+| BL Prior Only | 1.4883 | 15.22% | 15.42% | 0.5659 | 0.6879 | −27.95% |
+
+The key decomposition is:
+
+```text
+Sharpe:          0.5659 → 0.7672
+Annualized vol: 15.42%  → 15.44%
+```
+
+So the improvement is not explained by taking substantially more total risk.
+
+Relative to the updated 21-day shrinkage-Markowitz baseline:
+
+```text
+Shrinkage Markowitz Sharpe = 0.6512
+BL + ML Sharpe              = 0.7672
+```
+
+At this conservative confidence setting, BL + ML also approximately matches
+equal-weight Sharpe (`0.7707`) while producing lower volatility (`15.44%`
+vs. `16.89%`) and a smaller maximum drawdown (`−26.77%` vs. `−34.57%`).
+
+### 4.6 View-confidence sensitivity experiment
+
+A single BL confidence level could be accidental, so the experiment was
+repeated across different values of `uncertainty_multiplier` while keeping
+the rest of the pipeline fixed.
+
+Because
+
+```text
+Ω ∝ uncertainty_multiplier
+```
+
+larger values mean **less trust** in the ML views.
+
+| Uncertainty Multiplier | Annualized Return | Annualized Vol | Sharpe | Sortino | Max Drawdown |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 19.72% | 15.96% | 0.8288 | 1.0338 | −26.06% |
+| 2 | 19.68% | 15.69% | **0.8397** | **1.0453** | −25.89% |
+| 3 | 19.43% | 15.57% | 0.8305 | 1.0303 | **−25.80%** |
+| 4 | 19.33% | 15.51% | 0.8270 | 1.0223 | −25.87% |
+| 5 | 19.13% | 15.49% | 0.8155 | 1.0067 | −26.06% |
+| 10 | 18.34% | 15.44% | 0.7672 | 0.9415 | −26.77% |
+| 15 | 17.52% | 15.42% | 0.7150 | 0.8773 | −27.07% |
+| BL Prior Only | 15.22% | 15.42% | 0.5659 | 0.6879 | −27.95% |
+
+The important result is the **shape of the response**, not simply the numerical
+maximum at multiplier `2`.
+
+As ML views are trusted less, performance gradually declines toward the weaker
+prior-only solution. The broad `1–5` region remains strong, suggesting that the
+ML ranking signal contains useful information rather than the result depending
+on one knife-edge confidence setting.
+
+To avoid presenting the best observed test-period value as a universally
+optimal hyperparameter, the project uses the more representative
+`uncertainty_multiplier = 3` as the final reported configuration:
+
+```text
+Annualized return = 19.43%
+Annualized vol    = 15.57%
+Sharpe            = 0.8305
+Sortino           = 1.0303
+Max drawdown      = −25.80%
+```
+
+This final BL + ML configuration exceeds the updated equal-weight Sharpe
+(`0.7707`) while also showing lower volatility and a smaller maximum drawdown.
+
+### 4.7 What changed in the research story
+
+The project now forms one continuous sequence of experiments:
+
+```text
+1. Sample covariance becomes unstable as N/T rises.
+2. Ledoit-Wolf shrinkage improves covariance stability.
+3. Better covariance alone does not solve out-of-sample portfolio performance.
+4. Risk-aversion ablation identifies expected-return estimation as the bottleneck.
+5. The ML horizon is aligned with the monthly portfolio horizon (21 days).
+6. Black-Litterman replaces the noisy historical-mean anchor with a
+   market-implied equilibrium prior.
+7. ML forecasts are encoded as uncertain relative views.
+8. BL prior-only is weak, but adding ML views materially improves Sharpe.
+9. The confidence sweep shows that the improvement persists across a broad
+   confidence region and fades as the views are trusted less.
+```
+
+The project therefore evolves from studying
+
+```text
+covariance uncertainty
+        ↓
+expected-return uncertainty
+        ↓
+view uncertainty
+```
+
+rather than treating portfolio optimization as a single one-shot model.
+
 
 ---
 
@@ -322,25 +600,32 @@ number:
 
 ## 6. Project structure
 
-```
+```text
 portfolio-optimizer/
 ├── config/
-│   ├──test5.text
-│   └── nifty50.txt              # 39-ticker NSE large-cap universe
-├── data/
-│   ├── prices.parquet           # cached adjusted close prices
-│   └── features_long.parquet    # engineered features, long format
-├── src/
-│   ├── data_pipeline.py         # download prices, engineer features
-│   ├── covariance.py            # sample vs. Ledoit-Wolf shrinkage estimators
-│   ├── ml_predict.py            # LightGBM expected-return model
-│   ├── optimizer.py             # cvxpy Markowitz optimizer with constraints
-│   └── backtest.py              # walk-forward backtest engine + metrics
+│   └── nifty50.txt                  # 39-ticker NSE large-cap universe
 ├── dashboard/
-│   └── app.py                    # Streamlit dashboard
-├── run_real_backtest.py          # reproduces Section 4.2 results
-├── run_ablation.py               # reproduces Section 5.1 ablation
-└── requirements.txt
+│   └── app.py                       # current BL + ML portfolio interface
+├── data/
+│   ├── prices.parquet               # cached adjusted close prices
+│   ├── features_long.parquet        # engineered features, long format
+│   ├── shares_outstanding.csv       # historical shares for market-cap weights
+│   └── nifty50_market.csv           # NIFTY 50 market-return diagnostics
+├── src/
+│   ├── __init__.py
+│   ├── backtest.py                  # original walk-forward engine + metrics
+│   ├── black_litterman.py           # prior, P/Q views, Ω, BL posterior
+│   ├── covariance.py                # sample vs. Ledoit-Wolf estimators
+│   ├── data_pipeline.py             # features + 21-day forward-return target
+│   ├── market_data.py               # point-in-time market-cap construction
+│   ├── ml_predict.py                # LightGBM 21-day return model
+│   └── optimizer.py                 # constrained cvxpy Markowitz optimizer
+├── download_market_data.py          # historical shares / market-data download
+├── run_ablation.py                  # original return-estimation ablations
+├── run_black_litterman_backtest.py  # BL prior-only + BL/ML walk-forward test
+├── run_real_backtest.py             # updated 21-day baseline backtest
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -350,22 +635,29 @@ portfolio-optimizer/
 ```bash
 pip install -r requirements.txt
 
-# 1. Pull real data (needs internet access to Yahoo Finance)
+# 1. Pull / refresh real price data
 python -m src.data_pipeline --tickers config/nifty50.txt --start 2019-01-01
 
-# 2. Run the full walk-forward backtest (reproduces Section 4.2)
+# 2. Run the updated 21-day baseline backtest
 python run_real_backtest.py
 
-# 3. Run the ablation study (reproduces Section 5.1)
+# 3. Run the original ablation study
 python run_ablation.py
 
-# 4. Launch the interactive dashboard
+# 4. Download / refresh historical shares and market data used by BL
+python download_market_data.py
+
+# 5. Run the Black-Litterman walk-forward experiment
+python run_black_litterman_backtest.py
+
+# 6. Launch the current portfolio interface
 streamlit run dashboard/app.py
 ```
 
-The dashboard defaults to real cached data if `data/prices.parquet` exists,
-and falls back to synthetic data (with a clear on-screen notice) otherwise —
-so it never silently shows misleading numbers.
+The Streamlit app is now treated as a **user-facing interface for the final
+21-day + Black-Litterman + ML system**. The research history, ablations, and
+earlier results remain documented here in the README rather than being mixed
+into the top-level portfolio-allocation UI.
 
 ---
 
@@ -373,10 +665,10 @@ so it never silently shows misleading numbers.
 
 Things this project deliberately does **not** fake or hide:
 
-- **The ML model's real out-of-sample IC (0.015) is reported prominently**,
-  including in the dashboard itself, right next to the much higher but
-  meaningless in-sample training IC (0.149) — so the overfitting gap is
-  visible, not buried.
+- **The original ML model's weak out-of-sample IC (`0.015`) is retained and
+  reported rather than overwritten.** The updated 21-day experiment separately
+  reports mean walk-forward OOS IC `0.1019`, making the change in forecast
+  horizon explicit rather than silently replacing the earlier result.
 - **The backtest is strictly walk-forward.** No stage of the pipeline ever
   sees data from after the date it's making a decision for.
 - **Transaction costs and a turnover cap are applied** to every strategy,
@@ -389,6 +681,18 @@ Things this project deliberately does **not** fake or hide:
   equal-weight beat every optimized strategy tested. Rather than adjusting
   parameters until a flattering number appeared, the discrepancy was
   investigated and explained (Section 5).
+- **The original weak-result table is still retained.** Later 21-day and
+  Black-Litterman results are added as new experiments instead of replacing
+  the earlier result that motivated the investigation.
+- **The highest observed BL confidence-sweep Sharpe is not treated as an
+  automatically tuned optimum.** Multiplier `2` produced the highest observed
+  Sharpe (`0.8397`), but the project reports multiplier `3` (`0.8305`) as a
+  representative moderate-confidence configuration to avoid presenting a
+  test-period maximum as a universal optimum.
+- **Current dashboard allocation and historical backtest performance are
+  distinguished.** The dashboard's portfolio weights are the latest weights
+  produced by the final BL + ML methodology, while Sharpe `0.8305` is the
+  realized walk-forward result of that configuration over the historical test.
 
 ---
 
@@ -402,15 +706,22 @@ Things this project deliberately does **not** fake or hide:
   currently included — a natural next addition, since "how does this
   compare to just buying the index" is the most common real-world
   question this project doesn't yet answer directly.
-- **Black-Litterman as a natural next step:** the 1/N puzzle finding
-  suggests the real fix isn't better covariance estimation but better
-  *return* estimation — Black-Litterman blends market-implied equilibrium
-  returns with investor views via Bayesian updating, directly addressing
-  the noisy-mean problem this project identified, rather than treating
-  historical averages as ground truth.
+- **Black-Litterman as a natural next step — implemented in the current
+  extension:** the 1/N puzzle finding suggested that the real fix was not only
+  better covariance estimation but better *return* estimation. This solution
+  is now committed: the project builds a point-in-time market-implied
+  equilibrium prior, encodes 21-day ML rankings as relative views, models view
+  uncertainty through `Ω`, and evaluates BL prior-only vs. BL + ML in a
+  walk-forward backtest. The completed results are documented in Sections
+  4.4–4.7.
 - **Single-country, single-asset-class scope:** extending to multi-asset
   (bonds, gold, international equities) would test whether the 1/N puzzle
   finding holds when the asset universe is more heterogeneous.
+- **Controlled view-quality experiment:** a future extension can independently
+  degrade ML view quality by injecting controlled noise into `Q` and then study
+  `view quality × view confidence`. This would test whether Black-Litterman
+  behaves as intended when views become progressively less informative, rather
+  than only varying confidence on the naturally observed ML signal.
 
 ---
 
@@ -418,6 +729,6 @@ Things this project deliberately does **not** fake or hide:
 
 - **Data:** `yfinance`, `pandas`, `pyarrow`
 - **Statistics/ML:** `numpy`, `scikit-learn` (Ledoit-Wolf, gradient boosting
-  fallback), `lightgbm`, `scipy`
+  fallback), `lightgbm`, `scipy`; custom Black-Litterman implementation
 - **Optimization:** `cvxpy` (OSQP solver)
 - **Dashboard:** `streamlit`, `plotly`
