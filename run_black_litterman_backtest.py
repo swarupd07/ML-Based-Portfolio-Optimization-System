@@ -80,7 +80,7 @@ def parse_args():
         help=(
             "Multiplier applied to Omega. "
             "Higher = less confidence in ML views. "
-            "Default: 3."
+            "Default: 1."
         ),
     )
 
