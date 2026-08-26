@@ -361,7 +361,7 @@ streamlit run dashboard/app.py
 - The final pipeline explicitly **purges the last 21 trading dates before each rebalance**.
 - After the fix, OOS IC fell from the inflated value to **0.0225**, and BL + ML Sharpe fell to a more realistic **0.6563** at the strongest tested confidence.
 - Equal-weight still wins on Sharpe, and this is reported directly.
-- All backtests include transaction costs and turnover controls.
+- transaction costs apply to every strategy; turnover constraints apply to the optimized mean-variance strategies.
 
 ---
 
