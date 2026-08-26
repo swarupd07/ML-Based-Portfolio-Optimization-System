@@ -84,7 +84,7 @@ def run_backtest(prices: pd.DataFrame, long_df: pd.DataFrame, config: BacktestCo
 
         # Out-of-sample IC check (needs the actuals, only available once we
         # pass this rebalance date, so we log predicted vs what actually happened over the NEXT window for diagnostic purposes)
-        future_actual = long_df[long_df["date"] == rebal_date].set_index("ticker")["fwd_return_5d"]
+        future_actual = long_df[long_df["date"] == rebal_date].set_index("ticker")["fwd_return_21d"]
         ic_log.append({
             "date": rebal_date,
             "ic": out_of_sample_ic(ml_preds, future_actual),
